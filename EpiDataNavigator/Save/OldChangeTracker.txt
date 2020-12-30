@@ -1,0 +1,304 @@
+﻿using System.Data.SqlClient;
+
+namespace EpiDataNavigator
+{
+    public partial class FrmChangeTracker : Form
+    {
+        public string dbname;
+        public List<string> tbList = new List<string>();
+        public List<string> tbListAll = new List<string>();
+        long changeVersion;
+        public FrmChangeTracker()
+        {
+            InitializeComponent();
+        }
+        private void FrmChangeTracker_Load(object sender, EventArgs e)
+        {
+            SqlConnectionStringBuilder builder = new SqlConnectionStringBuilder(GlobalVar.connString);
+            dbname = builder.InitialCatalog;
+            this.Text = "Change Tracker SERVER=" + builder.DataSource + "  database:" + dbname;
+
+            using (SqlConnection connection = new SqlConnection(GlobalVar.connString))
+            {
+                connection.Open();
+
+                //Leggi tabelle
+                tbListAll.Clear();
+                string query = "select s.name + '.' + t.name tbName " +
+                                " from sys.tables t " +
+                                " left outer join sys.schemas s on t.schema_id = s.schema_id" +
+                                " where t.name <> 'sysdiagrams'" +
+                                " order by 1";
+                SqlCommand cmd = new SqlCommand(query, connection);
+                SqlDataReader reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    tbListAll.Add(reader.GetString(0));
+                }
+
+                dgw1.ColumnCount = 2;
+                dgw1.RowCount = 0;
+                dgw1.Columns[0].Name = "Table";
+                dgw1.Columns[1].Name = "Count";
+                //dgw1.Columns[0].Width = 2000;
+                //dgw1.Columns[0].Width = 500;
+                dgw1.RowHeadersVisible = false;
+                //dgw1.AutoResizeColumns();
+                dgw1.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.AllCells;
+
+                dgw2.ColumnCount = 0;
+                dgw1.RowCount = 0;
+            }
+        }
+
+
+        #region buttons
+        private void btnStart_Click(object sender, EventArgs e)
+        {
+            btnStart.Enabled = false;
+
+            StartTracking();
+        }
+
+        private void btnLoad_Click(object sender, EventArgs e)
+        {
+            btnLoad.Enabled = false;
+
+            LoadResult();
+
+            btnLoad.Enabled = true;
+        }
+
+
+        private void btnStop_Click(object sender, EventArgs e)
+        {
+
+            LoadResult();
+
+            StopTracking();
+
+            btnStart.Enabled = true;
+
+            btnLoad.Enabled = false;
+            btnStop.Enabled = false;
+
+        }
+
+        #endregion
+
+        #region Execute
+
+        private void StartTracking()
+        {
+            dgw1.RowCount = 0;
+
+            StatusLabel1.Text = "Starting";
+
+            using (SqlConnection connection = new SqlConnection(GlobalVar.connString))
+            {
+                tbList.Clear();
+                connection.Open();
+                SqlCommand cmd = new SqlCommand("", connection);
+
+                //Alter database
+                try
+                {
+                    cmd.CommandText=  " ALTER DATABASE " + dbname + " SET CHANGE_TRACKING = ON (CHANGE_RETENTION = 1 DAYS) ";
+                    cmd.ExecuteNonQuery();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message);
+                    StatusLabel1.Text = "Start error";
+                    return;
+                }
+
+                cmd.CommandText = "select CHANGE_TRACKING_CURRENT_VERSION()";
+                changeVersion = (long)cmd.ExecuteScalar();
+                lblVersion.Text = string.Format("Version: {0} ", changeVersion);
+
+                for (int i = 0; i < tbListAll.Count; i++)
+                {
+                    dgw1.Rows.Add();
+                    dgw1.Rows[dgw1.RowCount - 1].Cells[0].Value = tbListAll[i];
+                    try
+                    {
+                        cmd.CommandText = "ALTER TABLE " + tbListAll[i] + " ENABLE CHANGE_TRACKING WITH (TRACK_COLUMNS_UPDATED = ON); ";
+                        cmd.ExecuteNonQuery();
+                        dgw1.Rows[dgw1.RowCount - 1].Cells[1].Value = "OK";
+                        tbList.Add(tbListAll[i]);
+                    }
+
+                    catch (Exception ex)
+                    {
+                       dgw1.Rows[dgw1.RowCount - 1].Cells[1].Value = ex.Message;  
+                    }
+                }
+
+                StatusLabel1.Text="Start completed";
+                btnLoad.Enabled = true;
+                btnStop.Enabled = true;
+            }
+               
+        }
+
+        private void LoadResult()
+        {
+            dgw1.RowCount = 0;
+            StatusLabel1.Text = "loading....";
+
+            using (SqlConnection connection = new SqlConnection(GlobalVar.connString))
+            {
+                connection.Open();
+                SqlCommand cmd = new SqlCommand("", connection);
+                
+                for (int i = 0; i < tbList.Count; i++)
+                {
+                    cmd.CommandText = "select coalesce(count(*),0) from CHANGETABLE(CHANGES " + tbList[i] + ", " 
+                                        + changeVersion.ToString() + ") x ";
+                    int row = (int) cmd.ExecuteScalar();
+                    if (row>0)
+                    {
+                        dgw1.Rows.Add();
+                        dgw1.Rows[dgw1.RowCount - 1].Cells[0].Value = tbList[i];
+                        dgw1.Rows[dgw1.RowCount - 1].Cells[1].Value = row.ToString();
+                    }
+                }
+            }
+
+            StatusLabel1.Text = "Load completed";
+        }
+
+        private void dgw1_CellDoubleClick(object sender, DataGridViewCellEventArgs e)
+        {
+            if (!btnStart.Enabled)
+            {
+                if (e.RowIndex >= 0)
+                {
+                    string table = dgw1.Rows[e.RowIndex].Cells[0].FormattedValue.ToString();
+                    lblDetails.Text = "details of table: " + table;
+
+                    string query = "select * from CHANGETABLE(CHANGES "
+                        + table
+                        + ", " + changeVersion.ToString() + ") x ";
+
+                    using (SqlConnection connection = new SqlConnection(GlobalVar.connString))
+                    {
+                        connection.Open();
+
+                        SqlCommand sqlCmd = new SqlCommand();
+                        sqlCmd.Connection = connection;
+                        sqlCmd.CommandType = CommandType.Text;
+                        sqlCmd.CommandText = query;
+
+                        SqlDataAdapter sqlDataAdap = new SqlDataAdapter(sqlCmd);
+                        DataTable dtRecord = new DataTable();
+                        sqlDataAdap.Fill(dtRecord);
+
+                        dgw2.DataSource = dtRecord;
+                        dgw2.AutoResizeColumns(DataGridViewAutoSizeColumnsMode.AllCellsExceptHeader);
+
+                    }
+                }
+            }
+        }
+        private void dgw2_DataError(object sender, DataGridViewDataErrorEventArgs e)
+        {
+
+        }
+
+        private void StopTracking()
+        {
+            using (SqlConnection connection = new SqlConnection(GlobalVar.connString))
+            {
+                connection.Open();
+
+                SqlCommand cmd = new SqlCommand("", connection);
+
+                for (int i = 0; i < tbList.Count; i++)
+                {
+                    cmd.CommandText = "ALTER TABLE " + tbList[i] + " DISABLE CHANGE_TRACKING; ";
+                    cmd.ExecuteNonQuery();
+                }
+
+                cmd.CommandText = " ALTER DATABASE " + dbname + " SET CHANGE_TRACKING = OFF ";
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+
+        #endregion
+
+        private void btnForce_Click(object sender, EventArgs e)
+        {
+            btnStart.Enabled = true;
+            using (SqlConnection connection = new SqlConnection(GlobalVar.connString))
+            {
+                dgw1.ColumnCount = 2;
+                dgw1.RowCount = 0;
+                dgw1.Columns[0].Name = "Table";
+                dgw1.Columns[1].Name = "Result";
+
+                connection.Open();
+
+                SqlCommand cmd = new SqlCommand("", connection);
+
+                for (int i = 0; i < tbList.Count; i++)
+                {
+                    dgw1.Rows.Add();
+                    dgw1.Rows[dgw1.RowCount - 1].Cells[0].Value = tbList[i];
+                    cmd.CommandText = "ALTER TABLE " + tbList[i] + " DISABLE CHANGE_TRACKING; ";
+                    try
+                    {
+                        cmd.ExecuteNonQuery();
+                        dgw1.Rows[dgw1.RowCount - 1].Cells[1].Value = "OK";
+                    }
+                    catch (Exception ex)
+                    {
+                        dgw1.Rows[dgw1.RowCount - 1].Cells[1].Value = ex.Message;
+                    }
+                }
+
+                dgw1.Rows.Add();
+                dgw1.Rows[dgw1.RowCount - 1].Cells[0].Value = dbname;
+                cmd.CommandText = " ALTER DATABASE " + dbname + " SET CHANGE_TRACKING = OFF ";
+                try
+                {
+                    cmd.ExecuteNonQuery();
+                    dgw1.Rows[dgw1.RowCount - 1].Cells[1].Value = "OK";
+                }
+                catch (Exception ex)
+                {
+                    dgw1.Rows[dgw1.RowCount - 1].Cells[1].Value = ex.Message;
+                }
+            }
+
+            MessageBox.Show("Force stop executed");
+        }
+
+        private void btnTest_Click(object sender, EventArgs e)
+        {
+            using (SqlConnection connection = new SqlConnection(GlobalVar.connString))
+            {
+                connection.Open();
+
+                SqlCommand cmd = new SqlCommand("", connection);
+
+                cmd.CommandText = " update customers set birthdate=getdate()  ";
+                cmd.ExecuteNonQuery();
+
+                cmd.CommandText = " update docmast set date=getdate()  ";
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        private void FrmChangeTracker_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            if (btnStart.Enabled == false)
+            {
+                MessageBox.Show("Stop tracking before close this form");
+                e.Cancel = true;
+            }
+        }
+    }
+}
